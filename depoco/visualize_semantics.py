@@ -1,6 +1,5 @@
 import depoco.utils.point_cloud_utils as pcu
 import argparse
-import ruamel.yaml as yaml
 from depoco.trainer import DepocoNetTrainer
 import torch
 from ruamel.yaml import YAML 
@@ -24,7 +23,6 @@ if __name__ == "__main__":
     FLAGS, unparsed = parser.parse_known_args()
 
     print('passed flags')
-    #config = yaml.safe_load(open(FLAGS.config, 'r'))
     yaml = YAML(typ='safe', pure=True)
     config = yaml.load(open(FLAGS.config, 'r'))
     print('loaded yaml flags')
@@ -33,15 +31,18 @@ if __name__ == "__main__":
     print('initialized  trainer')
     for i, batch in enumerate(trainer.submaps.getOrderedTrainSet()):
         with torch.no_grad():
-            print(batch)
+            #print(batch)
             print("Before compression")
+            print(batch['features'].detach().cpu().numpy())
+            print('original')
+            print(batch['features_original'].detach().cpu().numpy())
             pcu.visPointCloud(batch['points'].detach().cpu().numpy())
-            pcu.visPointCloudWithSemantic(batch['points'].detach().cpu().numpy())
+            pcu.visPointCloudWithSemantic(batch['points'].detach().cpu().numpy(),label=batch['features'].detach().cpu().numpy())
             points_est,nr_emb_points = trainer.encodeDecode(batch)
             print("After compression")
             print(
                 f'nr embedding points: {nr_emb_points}, points out: {points_est.shape[0]}')
             pcu.visPointCloud(points_est.detach().cpu().numpy())
-            pcu.visPointCloudWithSemantic(points_est.detach().cpu().numpy())
+            pcu.visPointCloudWithSemantic(points_est.detach().cpu().numpy(),label=batch['features'].detach().cpu().numpy())
         if i+1 >= FLAGS.number:
             break

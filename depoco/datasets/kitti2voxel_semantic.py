@@ -10,6 +10,30 @@ import open3d as o3d
 import depoco.utils.point_cloud_utils as pcu
 from pathlib import Path
 import octree_handler
+from collections import defaultdict, Counter
+from ruamel.yaml import YAML 
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+import pandas as pd
+
+SUPER_CLASS_MAP = {
+    # ground
+    40: 0, 48: 1, 44: 2, 49: 0,
+    # structure
+    50: 3, 52: 3,
+    # vehicle
+    10: 4, 11: 4, 15: 4, 18: 4, 20: 4,
+    # nature
+    18: 4, 71: 5, 72: 9,
+    # human
+    30: 6, 31: 6, 32: 6,
+    # object
+    51: 7, 60:7, 80: 7, 81: 7, 99: 8, 
+}
+
+def map_labels_to_superclass_indices(labels):
+    """Map fine SemanticKITTI labels to 6-class index. Unmapped labels get -1."""
+    return np.vectorize(SUPER_CLASS_MAP.get)(labels, -1)
 
 
 def open_label(filename):
@@ -144,32 +168,71 @@ class Kitti2voxelConverter():
             self.test_folders = [pcu.path(config["dataset"]["data_folders"]["prefix"])+pcu.path(
                 fldid) for fldid in config["dataset"]["data_folders"]["test"]]
 
-    def getMaxMinHeight(self):
-        folders = self.train_folders + self.valid_folders + self.test_folders
-        n_bins = 1000
-        hist = np.zeros((n_bins))
-        time_start = time.time()
+    def _process_scan(self, args):
+        """Parallelized scan processing"""
+        i, poses, seq_path, lower_bound, upper_bound = args
+        sfile = seq_path + "velodyne/" + str(i).zfill(6)+'.bin'
+        scan = np.fromfile(sfile, dtype=np.float32) if os.path.isfile(sfile) else np.zeros((0, 4))
+        scan = scan.reshape((-1, 4))
+        
+        # Filter by distance
+        dists = np.linalg.norm(scan[:, 0:3], axis=1)
+        valid_p = (dists > self.config['grid']['min_range']) & (dists < self.config['grid']['max_range'])
+        scan = scan[valid_p]
+        
+        # Transform to world coordinates
+        scan_hom = np.ones((scan.shape[0], 4))
+        scan_hom[:, 0:3] = scan[:, 0:3]
+        points = np.matmul(poses[i], scan_hom.T).T[:, 0:3]
+        
+        # Load labels
+        label = np.full((points.shape[0],), 2)
+        if os.path.isfile(seq_path + "labels/" + str(i).zfill(6)+'.label'):
+            label = open_label(filename=seq_path + "labels/" + str(i).zfill(6)+'.label')[valid_p]
+        
+        # Filter points
+        valids = (np.all(points > lower_bound, axis=1) & 
+                 np.all(points < upper_bound, axis=1) & 
+                 (label < 200) & (label > 1))
+        
+        return points[valids], scan[valids, 3], label[valids]
 
-        for p in folders:
-            # calibration = parse_calibration(p+ "calib.txt")
-            # poses = parse_poses( p+"poses.txt", calibration)
-            scan_files = [
-                f for f in sorted(os.listdir(os.path.join(p, "velodyne")))
-                if f.endswith(".bin")]
-            for i, f in enumerate(scan_files):
-                scan = np.fromfile(p+"velodyne/"+f, dtype=np.float32)
-                scan = scan.reshape((-1, 4))
-                hist_i, temp_range = np.histogram(
-                    scan[:, 2], bins=n_bins, range=(-30, 30))
-                hist += hist_i
-
-            print('min max time', time.time()-time_start)
-            print('hist_size', hist.shape)
-
-        plt.figure()
-        plt.plot(temp_range[1:], hist)
-        np.savetxt('hist', hist)
-        plt.show()
+    def _voxel_downsample(self, points, intensities, labels, voxel_size):
+        """Pandas-based implementation for large datasets"""
+        # Convert to DataFrame
+        df = pd.DataFrame({
+            'x': points[:, 0],
+            'y': points[:, 1],
+            'z': points[:, 2],
+            'intensity': intensities,
+            'label': map_labels_to_superclass_indices(labels)
+        })
+        
+        # Calculate voxel coordinates
+        df['voxel_x'] = np.floor(df['x'] / voxel_size).astype(int)
+        df['voxel_y'] = np.floor(df['y'] / voxel_size).astype(int)
+        df['voxel_z'] = np.floor(df['z'] / voxel_size).astype(int)
+        
+        # Filter out invalid labels
+        df_valid = df[df['label'] >= 0].copy()
+        
+        # Group by voxel coordinates
+        grouped = df.groupby(['voxel_x', 'voxel_y', 'voxel_z'])
+        grouped_valid = df_valid.groupby(['voxel_x', 'voxel_y', 'voxel_z'])
+        
+        # Calculate mean positions and intensity
+        result = grouped[['x', 'y', 'z', 'intensity']].mean()
+        
+        # Calculate most frequent valid label
+        if not df_valid.empty:
+            mode_labels = grouped_valid['label'].agg(lambda x: x.mode()[0])
+            result['label'] = mode_labels
+        else:
+            result['label'] = -1
+        
+        # Reset index and return as numpy array
+        result = result.reset_index(drop=True)
+        return result[['x', 'y', 'z', 'intensity', 'label']].values
 
     def sparsifieO3d(self, poses, key_pose_idx, seq_path, distance_matrix):
         grid_size = np.array((self.config['grid']['size']))
@@ -177,57 +240,71 @@ class Kitti2voxelConverter():
             np.array((0, 0, self.config['grid']['dz']))
         upper_bound = center + grid_size/2
         lower_bound = center - grid_size/2
+        
         valid_scans = np.argwhere(
             distance_matrix[key_pose_idx, :] < grid_size[0] + self.config['grid']['max_range']).squeeze()
-        # print('valid scans', valid_scans,'shape',valid_scans.shape)
-        point_cld = ()
-        features = ()
+        
+        # Use lists instead of tuples for better performance
+        point_list = []
+        feature_list = []
+        
         for i in valid_scans:
             sfile = seq_path + "velodyne/" + str(i).zfill(6)+'.bin'
-            scan = np.fromfile(sfile, dtype = np.float32) if os.path.isfile(sfile) else np.zeros((0, 4))
-            scan=scan.reshape((-1, 4))
-            dists=np.linalg.norm(scan[:, 0:3], axis=1)
-            valid_p=(dists > self.config['grid']['min_range']) & (
-                dists < self.config['grid']['max_range'])
-            scan_hom=np.ones_like(scan)
-            scan_hom[:, 0:3]=scan[:, 0:3]
-            points=np.matmul(poses[i], scan_hom[valid_p, :].T).T
-            #### intensity and label #######
-            intensity=scan[valid_p, 3:4]
-            label=np.full((points.shape[0],), 2)
-            if os.path.isfile(seq_path + "labels/" +
-                               str(i).zfill(6)+'.label'):
-                label=open_label(filename=seq_path + "labels/" +
-                               str(i).zfill(6)+'.label')[valid_p]
-            # print('max min label',np.max(label),np.min(label))
-            feature=np.hstack((intensity, np.expand_dims(
-                label.astype('float'), axis=1), np.zeros_like(intensity)))  # concat intensity,label and a 0 (0 for havin 3dims)
-
-            points=points[:, 0:3]
-            # print('features', feature.shape, 'points', points.shape)
-            valids=np.all(points > lower_bound, axis=1) & np.all(
-                points < upper_bound, axis=1).reshape(-1) & (label < 200) & (label > 1)  # remove moving objects and outlier
-            point_cld += (points[valids, :],)
-            features += (feature[valids],)
-
-        # o3d
-        pcd=o3d.geometry.PointCloud()
-        cloud=np.concatenate(point_cld)
-        cloud_clr=np.concatenate(features)
-        pcd.points=o3d.utility.Vector3dVector(cloud)
-        pcd.colors=o3d.utility.Vector3dVector(cloud_clr)
-        downpcd=pcd.voxel_down_sample(
-            voxel_size=self.config['grid']['voxel_size'])
-        sparse_points=np.asarray(downpcd.points)
-        sparse_features=np.asarray(downpcd.colors)
-        sparse_features=sparse_features[:, :2]
-        sparse_features[:, 1]=np.around(sparse_features[:, 1])
-        sparse_points=np.hstack((sparse_points, sparse_features))
-        print('#points', cloud.shape, 'to', sparse_points.shape,
-              'features', sparse_features.shape)
-
-        # print('grid time', time.time() - time_start)
-        return sparse_points
+            scan = np.fromfile(sfile, dtype=np.float32) if os.path.isfile(sfile) else np.zeros((0, 4))
+            scan = scan.reshape((-1, 4))
+            
+            # Vectorized distance calculation
+            dists = np.linalg.norm(scan[:, 0:3], axis=1)
+            valid_p = (dists > self.config['grid']['min_range']) & (dists < self.config['grid']['max_range'])
+            scan = scan[valid_p]
+            
+            # Homogeneous transformation
+            scan_hom = np.ones((scan.shape[0], 4))
+            scan_hom[:, 0:3] = scan[:, 0:3]
+            points = np.matmul(poses[i], scan_hom.T).T
+            
+            # Process labels
+            label = np.full((points.shape[0],), 2)
+            label_file = seq_path + "labels/" + str(i).zfill(6)+'.label'
+            if os.path.isfile(label_file):
+                label = open_label(label_file)[valid_p]
+            
+            # Create features (intensity + label)
+            feature = np.column_stack((
+                scan[:, 3],  # intensity
+                label.astype('float'),
+                np.zeros(label.shape[0])  # padding
+            ))
+            
+            points = points[:, 0:3]  # Remove homogeneous coordinate
+            
+            # Combined validation mask
+            valids = (
+                np.all(points > lower_bound, axis=1) & 
+                np.all(points < upper_bound, axis=1) & 
+                (label < 200) & (label > 1)
+            )
+            
+            point_list.append(points[valids])
+            feature_list.append(feature[valids])
+        
+        if not point_list:
+            return np.zeros((0, 5))  # Return empty array if no points
+        
+        # Concatenate all points and features
+        cloud = np.concatenate(point_list)
+        cloud_clr = np.concatenate(feature_list)
+        
+        # Create Open3D point cloud
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(cloud)
+        pcd.colors = o3d.utility.Vector3dVector(cloud_clr)
+        
+        # First pass: Fast voxel downsampling
+        voxel_size = self.config['grid']['voxel_size']
+        downpcd = self._voxel_downsample(cloud,cloud_clr[:, 0],cloud_clr[:, 1].astype(np.int32),voxel_size)       
+        print(f'#points {cloud.shape[0]} -> {downpcd.shape[0]}')
+        return downpcd
 
     def convert(self):
         time_very_start=time.time()
@@ -262,11 +339,12 @@ class Kitti2voxelConverter():
                 octree.setInput(points)
                 eig_normals=octree.computeEigenvaluesNormal(
                     self.config['grid']['normal_eigenvalue_radius'])
+                print('sparse_points',sparse_points_features.shape)
                 sparse_points_features=np.hstack(
                     (sparse_points_features, eig_normals))
                 print('normal and eigenvalues estimation time',
                       time.time() - time_start)
-                # print('sparse_points',sparse_points.shape)
+                print('sparse_points',sparse_points_features.shape)
                 pcu.saveCloud2Binary(sparse_points_features, str(
                     i).zfill(6)+'.bin', out_dir)
 
@@ -302,7 +380,9 @@ if __name__ == "__main__":
     )
 
     FLAGS, unparsed=parser.parse_known_args()
-    ARCH=yaml.safe_load(open(FLAGS.arch_cfg, 'r'))
+    yaml = YAML(typ='safe', pure=True)
+    ARCH = yaml.load(open(FLAGS.arch_cfg, 'r'))
+    #ARCH=yaml.safe_load(open(FLAGS.arch_cfg, 'r'))
 
     input_folder=FLAGS.dataset + '/sequences/00/'
     calibration=parse_calibration(os.path.join(input_folder, "calib.txt"))

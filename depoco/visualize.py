@@ -36,12 +36,12 @@ if __name__ == "__main__":
             print(batch)
             print("Before compression")
             pcu.visPointCloud(batch['points'].detach().cpu().numpy())
-            pcu.visPointCloudWithSemantic(batch['points'].detach().cpu().numpy())
-            points_est,nr_emb_points = trainer.encodeDecode(batch)
+    
+            points_est,features, point_attribute, nr_emb_points = trainer.encodeDecode(batch)
             print("After compression")
             print(
                 f'nr embedding points: {nr_emb_points}, points out: {points_est.shape[0]}')
             pcu.visPointCloud(points_est.detach().cpu().numpy())
-            pcu.visPointCloudWithSemantic(points_est.detach().cpu().numpy())
+            
         if i+1 >= FLAGS.number:
             break

@@ -2,8 +2,8 @@
 # training parameters
 ################################################################################
 train:
-  experiment_id: "depoco_sk_data_16_7_2025"
-  max_epochs: 100
+  experiment_id: "depoco_semantic"
+  max_epochs: 80
   use_adam: True
   batch_size: 32 # batch size
   max_nr_pts: 30000 # nr points
@@ -110,18 +110,15 @@ network:
 ################################################################################
 dataset:
   data_folders:
-    grid_output: "/data" #path/to/the/submaps/
+    grid_output: "/output" #path/to/the/submaps/
     prefix: "/data/sequences" #only needed for Kitti2Submap conversion (kitti-format)
     train: 
       - "01"
-      - "02"
       - "03"
       - "04"
-      - "05"
       - "06"
       - "07"
-      - "10"
     valid:
-      - "09"
+      - "validation"
     test:
       - "08"

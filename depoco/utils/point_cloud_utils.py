@@ -1,3 +1,4 @@
+
 import numpy as np
 import open3d as o3d
 import torch
@@ -39,89 +40,6 @@ def visPointCloud(pcd, colors=None, normals=None, downsample=None, show_normals=
         pcd_o3 = pcd_o3.voxel_down_sample(downsample)
     o3d.visualization.draw_geometries([pcd_o3], point_show_normal=show_normals)
 
-def visPointCloudWithSemantic(pcd, label,colors=None, normals=None, downsample=None, show_normals=False):
-    classes = {
-    0: ("unlabeled", [0, 0, 0]),
-    1: ("outlier", [0, 0, 255]),
-    10: ("car", [245, 150, 100]),
-    11: ("bicycle", [245, 230, 100]),
-    13: ("bus", [250, 80, 100]),
-    15: ("motorcycle", [150, 60, 30]),
-    16: ("on-rails", [255, 0, 0]),
-    18: ("truck", [180, 30, 80]),
-    20: ("other-vehicle", [255, 0, 0]),
-    30: ("person", [30, 30, 255]),
-    31: ("bicyclist", [200, 40, 255]),
-    32: ("motorcyclist", [90, 30, 150]),
-    40: ("road", [255, 0, 255]),
-    44: ("parking", [255, 150, 255]),
-    48: ("sidewalk", [75, 0, 75]),
-    49: ("other-ground", [75, 0, 175]),
-    50: ("building", [0, 200, 255]),
-    51: ("fence", [50, 120, 255]),
-    52: ("other-structure", [0, 150, 255]),
-    60: ("lane-marking", [170, 255, 150]),
-    70: ("vegetation", [0, 175, 0]),
-    71: ("trunk", [0, 60, 135]),
-    72: ("terrain", [80, 240, 150]),
-    80: ("pole", [150, 240, 255]),
-    81: ("traffic-sign", [0, 0, 255]),
-    99: ("other-object", [255, 255, 50]),
-    252: ("moving-car", [245, 150, 100]),
-    253: ("moving-bicyclist", [255, 0, 0]),
-    254: ("moving-person", [200, 40, 255]),
-    255: ("moving-motorcyclist", [30, 30, 255]),
-    256: ("moving-on-rails", [255, 0, 0]),
-    257: ("moving-bus", [250, 80, 100]),
-    258: ("moving-truck", [180, 30, 80]),
-    259: ("moving-other-vehicle", [255, 0, 0])
-    }
-
-    pcd_o3 = o3d.geometry.PointCloud()
-    pcd_o3.points = o3d.utility.Vector3dVector(pcd[:, 0:3])
-    labels = label.flatten().astype(np.uint32)  # Ensure labels are flat and integers
-    
-    # Create color array
-    colors = np.zeros((len(pcd), 3), dtype=np.uint8)
-    
-    for i, lbl in enumerate(labels):
-        # Convert label to Python native type if it's a numpy type
-        lbl_int = int(lbl) if isinstance(lbl, (np.integer, np.ndarray)) else lbl
-        if lbl_int in classes:
-            colors[i] = classes[lbl_int][1]
-        else:
-            colors[i] = [0, 0, 0]  # black for unknown labels
-    
-    pcd_o3.colors = o3d.utility.Vector3dVector(colors/255.0)
-    
-    if normals is not None:
-        pcd_o3.normals = o3d.utility.Vector3dVector(normals)
-    
-    if downsample is not None:
-        pcd_o3 = pcd_o3.voxel_down_sample(downsample)
-
-    if downsample is not None:
-        pcd_o3 = pcd_o3.voxel_down_sample(downsample)
-    o3d.visualization.draw_geometries([pcd_o3], point_show_normal=show_normals)
-
-def visPointCloudOffscreen(pcd, colors=None, normals=None, downsample=None, show_normals=False, out_path="/data/pcd_render.png"):
-    pcd_o3 = o3d.geometry.PointCloud()
-    pcd_o3.points = o3d.utility.Vector3dVector(pcd[:, 0:3])
-    if colors is not None:
-        pcd_o3.colors = o3d.utility.Vector3dVector(colors)
-    if normals is not None:
-        pcd_o3.normals = o3d.utility.Vector3dVector(normals)
-    if downsample is not None:
-        pcd_o3 = pcd_o3.voxel_down_sample(downsample)
-
-    vis = o3d.visualization.Visualizer()
-    vis.create_window(visible=False)
-    vis.add_geometry(pcd_o3)
-    vis.poll_events()
-    vis.update_renderer()
-    vis.capture_screen_image(out_path)
-    vis.destroy_window()
-    print(f"[✓] Point cloud rendered and saved to {out_path}")
 
 def visPointClouds(pcd_list, colors_list=None):
     pcd_o3_list = []

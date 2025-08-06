@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from depoco.trainer import DepocoNetTrainer
+from depoco.trainer_06 import DepocoNetTrainer_semantic
 import argparse
 import time
 import depoco.utils.point_cloud_utils as pcu
@@ -32,7 +32,7 @@ if __name__ == "__main__":
     #config = yaml.safe_load(open(FLAGS.config_cfg, 'r'))
     print('loaded yaml flags')
     print('config:', FLAGS.config_cfg)
-    trainer = DepocoNetTrainer(config)
+    trainer = DepocoNetTrainer_semantic(config)
     print('initialized  trainer')
     # trainer.train()
     ts = time.time()

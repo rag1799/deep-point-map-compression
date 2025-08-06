@@ -166,8 +166,8 @@ class SubMapDataSet(Dataset):
                  nr_points=10000,
                  cols=3,
                  on_the_fly=True,
-                 init_ones=True,
-                 feature_cols=[],
+                 init_ones=False,
+                 feature_cols=[1],
                  grid_size = 40):
         self.data_dirs = data_dirs
         self.nr_submaps = nr_submaps
@@ -192,7 +192,13 @@ class SubMapDataSet(Dataset):
             points = self.submaps[index].getRandPoints(
                 self.nr_points, seed=index)
             out_dict['points'] = points[:, :3]
-            out_dict['points_attributes'] = points[:, 3:]
+            
+            ####################
+            points_attributes = points[:, 3:]
+            points_attributes = np.nan_to_num(points_attributes, nan=-1.0)
+            out_dict['points_attributes'] = points_attributes
+
+            ###################
             map_ = self.submaps[index].getPoints()
             out_dict['map'] = map_[:, :3]
             out_dict['map_attributes'] = map_[:, 3:]
@@ -313,7 +319,7 @@ if __name__ == "__main__":
     )
 
     FLAGS, unparsed = parser.parse_known_args()
-    config = yaml.safe_load(open(FLAGS.cfg, 'r'))
+    config = yaml.load(open(FLAGS.cfg, 'r'))
     s = time.time()
 
     print(20*'#', 'Torch data loader', 20*'#')

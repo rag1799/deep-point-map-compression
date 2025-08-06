@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
-from depoco.trainer import DepocoNetTrainer
-from ruamel import yaml
+from depoco.trainer_06 import DepocoNetTrainer_semantic
 import argparse
 import time
 import depoco.utils.point_cloud_utils as pcu
 import os
+from ruamel.yaml import YAML 
 
 if __name__ == "__main__":
     print('Hello')
@@ -27,10 +27,12 @@ if __name__ == "__main__":
     FLAGS, unparsed = parser.parse_known_args()
 
     print('passed flags')
-    config = yaml.safe_load(open(FLAGS.config_cfg, 'r'))
+    yaml = YAML(typ='safe', pure=True)
+    config = yaml.load(open(FLAGS.config_cfg, 'r'))
+    #config = yaml.safe_load(open(FLAGS.config_cfg, 'r'))
     print('loaded yaml flags')
     print('config:', FLAGS.config_cfg)
-    trainer = DepocoNetTrainer(config)
+    trainer = DepocoNetTrainer_semantic(config)
     print('initialized  trainer')
     # trainer.train()
     ts = time.time()

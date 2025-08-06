@@ -65,7 +65,10 @@ class Evaluator():
         self.eval_results['chamfer_dist_abs'].append(
             out_dict['chamfer_dist_abs'])
 
-
+        print(f"gt_points shape: {gt_points.shape}")
+        print(f"source_points shape: {source_points.shape}")
+        print(f"idx3: {idx3}")
+        print(f"gt_normals shape: {gt_normals.shape}")
         ############ PSNR ##############
         if gt_normals is not None:  # Computing PSNR if we have normals
             gt_normals = gt_normals.cuda().detach()

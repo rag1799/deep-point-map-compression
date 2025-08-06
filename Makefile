@@ -1,19 +1,21 @@
 IMAGE_NAME=depoco
 TAG=latest
-DATASETS= /media/lwiesmann/WiesmannIPB/data/data_kitti/dataset/submaps/40m_ILEN/
+DATASETS=/home/rashmi/Documents/data_for_depoco/submaps/40m_ILEN
+OUTPUT_DIR=/home/rashmi/Documents/depoco_output
 
 build:
 	@echo Building docker container $(IMAGE_NAME)
-	nvidia-docker build -t $(IMAGE_NAME):$(TAG) .
+	docker build -t $(IMAGE_NAME):$(TAG) .
 
 test:
 	@echo NVIDIA and CUDA setup
-	@nvidia-docker run --rm $(IMAGE_NAME):$(TAG) nvidia-smi
+	@docker run --rm $(IMAGE_NAME):$(TAG) nvidia-smi
 	@echo PytTorch CUDA setup installed?
-	@nvidia-docker run --rm $(IMAGE_NAME):$(TAG) python3 -c "import torch; print(torch.cuda.is_available())"
+	@docker run --rm $(IMAGE_NAME):$(TAG) python3 -c "import torch; print(torch.cuda.is_available())"
 
 run:
-	docker run --rm --gpus all -p 8888:8888 -it -v $(DATASETS):/data $(IMAGE_NAME)
+	docker run --rm --gpus all -p 8888:8888 -it -e DISPLAY=$(DISPLAY) -e  "XDG_RUNTIME_DIR" -v /tmp/.X11-unix:/tmp/.X11-unix -v "$(XDG_RUNTIME_DIR):$(XDG_RUNTIME_DIR)" -v $(DATASETS):/data -v $(OUTPUT_DIR):/output $(IMAGE_NAME) 
+  	
 
 clean:
 	@echo Removing docker image...

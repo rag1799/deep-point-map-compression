@@ -22,7 +22,7 @@ import depoco.architectures.loss_handler as loss_handler
 from tqdm.auto import trange, tqdm
 from ruamel.yaml import YAML 
 
-class DepocoNetTrainer():
+class DepocoNetTrainer_semantic():
     def __init__(self, config):
         t_start = time.time()
         # parameters
@@ -192,7 +192,7 @@ class DepocoNetTrainer():
                 #####################
                 ###### Loss #########
                 #####################
-                loss = self.getTrainLoss(input_points, samples, translation)
+                loss = self.getTrainLoss(input_points, samples, translation, input_dict['features'].view(input_dict['features'].size(1), -1))
                 loss += loss_handler.linDeconvRegularizer(
                     self.decoder_model,
                     weight=self.config['train']['loss_weights']['upsampling_reg'],
@@ -258,17 +258,47 @@ class DepocoNetTrainer():
                 time_est = (time.time() - n_pct_time)/n_pct*(100-n_pct)
                 print("%4d%s in %ds, estim. time left: %ds (%dmin), best loss: %.5f" % (
                     n_pct, "%", time.time() - n_pct_time, time_est, time_est/60, best_loss))
+                
+    def getSemanticLossMask(self, labels, priority_labels=[4,5,6,7]):
+        """
+        Returns a weight mask where priority labels have weight 1.0, others get reduced.
+        Args:
+            labels: Tensor containing integer/float labels (N,)
+            priority_labels: List of labels to prioritize (can include integers or floats like 2.0)
+        """
+        if not isinstance(labels, torch.Tensor):
+            labels = torch.tensor(labels, device=self.device)
+        
+        # Flatten to 1D and convert to long
+        label_ids = labels.view(-1).long()
+        
+        # Convert priority labels to tensor with same device
+        priority_tensor = torch.tensor(priority_labels, device=self.device)
+        
+        weights = torch.where(
+            torch.isin(label_ids, priority_tensor),
+            torch.tensor(1.0, device=self.device),
+            torch.tensor(0.1, device=self.device)
+        )
+        return weights
 
-    def getTrainLoss(self, gt_points: torch.tensor, samples, translations,):
-        loss = torch.tensor(
-            0.0, dtype=torch.float32, device=self.device)  # init loss
+    def getTrainLoss(self, gt_points: torch.Tensor, samples: torch.Tensor, translations: torch.Tensor, features: torch.Tensor):
+        loss = torch.tensor(0.0, dtype=torch.float32, device=self.device)
         samples_transf = samples + translations
 
-        # Chamfer Loss between input and samples+T
-        d_map2transf, d_transf2map, idx3, idx4 = self.cham_loss(
-            gt_points.unsqueeze(0), samples_transf.unsqueeze(0))
-        loss += (self.w_map2transf * d_map2transf.mean() +
-                 self.w_transf2map * d_transf2map.mean())
+        # Chamfer distance
+        d_map2transf, d_transf2map, _, _ = self.cham_loss(
+            gt_points.unsqueeze(0), samples_transf.unsqueeze(0)
+        )
+
+        # Get single label value per point from column 1
+        labels = features[:, 1]  # Shape: (N,)
+        semantic_mask = self.getSemanticLossMask(labels).view(-1)
+
+        loss += (
+            self.w_map2transf * (semantic_mask * d_map2transf.view(-1)).mean()
+            + self.w_transf2map * (semantic_mask * d_transf2map.view(-1)).mean()
+        )
         return loss
 
     def evaluate(self, dataloader,
@@ -345,29 +375,34 @@ class DepocoNetTrainer():
 
     def encodeDecode(self, input_dict, float_16=True):
         map_idx = input_dict['idx']
-        # print('map:', map_idx)
         scale = input_dict['scale']
+
+        # Convert one-hot encoded features from integer to float
+        input_dict['features'] = input_dict['features'].float()  # Convert to float32
+
+        # Move data to the correct device (GPU/CPU)
         input_dict['features'] = input_dict['features'].to(self.device)
         input_dict['points'] = input_dict['points'].to(self.device)
-        print(f"input_dict: {input_dict.keys()}")
 
-        ####### Cast to float_16 if necessary #######
-        out_dict = self.encoder_model(input_dict.copy())
+        # Cast to float_16 if necessary
         if float_16:
-            out_dict['points'] = out_dict['points'].half().float()
-            out_dict['features'] = out_dict['features'].half().float()
-        nr_emb = out_dict['points'].shape
-        ############# Decoder ##################
+            input_dict['features'] = input_dict['features'].half()  # Convert to float16
+            input_dict['points'] = input_dict['points'].half()  # Optionally convert points to float16 as well
+
+        # Encoder
+        out_dict = self.encoder_model(input_dict.copy())
+
+        # Decoder
         out_dict = self.decoder_model(out_dict)
 
-        print(f"out_dict: {out_dict.keys()}")
+        # Apply translation and transformation
         translation = out_dict['features'][:, :3]
         samples = out_dict['points']
-        samples_transf = samples+translation
+        samples_transf = samples + translation
 
-        samples_transf *= scale
-        samples *= scale
-        return samples_transf, out_dict['features'], out_dict['points_attributes'],nr_emb
+        samples_transf *= scale  # Apply scaling
+        return samples_transf, out_dict['points'].shape  # Return transformed samples and the shape of the points
+
 
 
 if __name__ == "__main__":
@@ -377,7 +412,7 @@ if __name__ == "__main__":
         '--config', '-cfg',
         type=str,
         required=False,
-        default='config/depoco.yaml',
+        default='config/depoco_06_08_semantic.yaml',
         help='configitecture yaml cfg file. See /config/config for example',
     )
     FLAGS, unparsed = parser.parse_known_args()
@@ -387,6 +422,7 @@ if __name__ == "__main__":
     config = yaml.load(open(FLAGS.config, 'r'))
     #config = yaml.safe_load(open(FLAGS.config, 'r'))
     print('loaded yaml flags')
-    trainer = DepocoNetTrainer(config)
+    print('starting trainer')
+    trainer = DepocoNetTrainer_semantic(config)
     print('initialized  trainer')
     trainer.train(verbose=True)

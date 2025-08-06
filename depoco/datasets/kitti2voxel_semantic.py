@@ -1,3 +1,4 @@
+
 import numpy as np
 import argparse
 from numpy.linalg import inv
@@ -13,39 +14,27 @@ from collections import defaultdict, Counter
 from ruamel.yaml import YAML 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
+import pandas as pd
 
-# Define the label mapping and one-hot encoding parameters
-LABEL_MAPPING = {
-    1:  0,   # "unlabeled" (ignore)
-    10: 1,   # "car"
-    11: 2,   # "bicycle"
-    13: 3,   # "bus"
-    15: 4,   # "motorcycle"
-    30: 5,   # "person"
-    40: 6,   # "road"
-    48: 7,   # "sidewalk"
-    50: 8,   # "building"
-    70: 9,   # "vegetation"
-    # Ignore all other classes (map to 0 or a background class)
+SUPER_CLASS_MAP = {
+    # ground
+    40: 0, 48: 1, 44: 2, 49: 0,
+    # structure
+    50: 3, 52: 3,
+    # vehicle
+    10: 4, 11: 4, 15: 4, 18: 4, 20: 4,
+    # nature
+    18: 4, 71: 5, 72: 9,
+    # human
+    30: 6, 31: 6, 32: 6,
+    # object
+    51: 7, 60:7, 80: 7, 81: 7, 99: 8, 
 }
 
-NUM_CLASSES = len(LABEL_MAPPING)
+def map_labels_to_superclass_indices(labels):
+    """Map fine SemanticKITTI labels to 6-class index. Unmapped labels get -1."""
+    return np.vectorize(SUPER_CLASS_MAP.get)(labels, -1)
 
-def label_to_one_hot(labels):
-    """Convert labels to one-hot encoding"""
-    # First map the labels to our reduced set of classes
-    mapped_labels = np.zeros_like(labels, dtype=np.int32)
-    for original_label, mapped_label in LABEL_MAPPING.items():
-        mapped_labels[labels == original_label] = mapped_label
-    
-    # Create one-hot encoding
-    valid_indices = (mapped_labels >= 0) & (mapped_labels < NUM_CLASSES)
-    one_hot = np.zeros((labels.shape[0], NUM_CLASSES), dtype=np.int32)
-    one_hot[np.arange(labels.shape[0])[valid_indices], mapped_labels[valid_indices]] = 1
-    #one_hot = np.zeros((labels.shape[0], NUM_CLASSES), dtype=np.float32)
-    #one_hot[np.arange(labels.shape[0]), mapped_labels] = 1
-    
-    return one_hot
 
 def open_label(filename):
     """ Open raw scan and fill in attributes
@@ -66,6 +55,7 @@ def open_label(filename):
 
     # set it
     return label
+
 
 def parse_calibration(filename):
     """ read calibration file with given filename
@@ -207,9 +197,44 @@ class Kitti2voxelConverter():
         
         return points[valids], scan[valids, 3], label[valids]
 
+    def _voxel_downsample(self, points, intensities, labels, voxel_size):
+        """Pandas-based implementation for large datasets"""
+        # Convert to DataFrame
+        df = pd.DataFrame({
+            'x': points[:, 0],
+            'y': points[:, 1],
+            'z': points[:, 2],
+            'intensity': intensities,
+            'label': map_labels_to_superclass_indices(labels)
+        })
+        
+        # Calculate voxel coordinates
+        df['voxel_x'] = np.floor(df['x'] / voxel_size).astype(int)
+        df['voxel_y'] = np.floor(df['y'] / voxel_size).astype(int)
+        df['voxel_z'] = np.floor(df['z'] / voxel_size).astype(int)
+        
+        # Filter out invalid labels
+        df_valid = df[df['label'] >= 0].copy()
+        
+        # Group by voxel coordinates
+        grouped = df.groupby(['voxel_x', 'voxel_y', 'voxel_z'])
+        grouped_valid = df_valid.groupby(['voxel_x', 'voxel_y', 'voxel_z'])
+        
+        # Calculate mean positions and intensity
+        result = grouped[['x', 'y', 'z', 'intensity']].mean()
+        
+        # Calculate most frequent valid label
+        if not df_valid.empty:
+            mode_labels = grouped_valid['label'].agg(lambda x: x.mode()[0])
+            result['label'] = mode_labels
+        else:
+            result['label'] = -1
+        
+        # Reset index and return as numpy array
+        result = result.reset_index(drop=True)
+        return result[['x', 'y', 'z', 'intensity', 'label']].values
 
     def sparsifieO3d(self, poses, key_pose_idx, seq_path, distance_matrix):
-       
         grid_size = np.array((self.config['grid']['size']))
         center = poses[key_pose_idx][0:3, -1] + \
             np.array((0, 0, self.config['grid']['dz']))
@@ -219,117 +244,67 @@ class Kitti2voxelConverter():
         valid_scans = np.argwhere(
             distance_matrix[key_pose_idx, :] < grid_size[0] + self.config['grid']['max_range']).squeeze()
         
-        # Collect all points, intensities, and raw labels
-        all_points = []
-        all_intensities = []
-        all_labels = []
+        # Use lists instead of tuples for better performance
+        point_list = []
+        feature_list = []
         
         for i in valid_scans:
             sfile = seq_path + "velodyne/" + str(i).zfill(6)+'.bin'
             scan = np.fromfile(sfile, dtype=np.float32) if os.path.isfile(sfile) else np.zeros((0, 4))
             scan = scan.reshape((-1, 4))
             
-            # Filter by distance
+            # Vectorized distance calculation
             dists = np.linalg.norm(scan[:, 0:3], axis=1)
             valid_p = (dists > self.config['grid']['min_range']) & (dists < self.config['grid']['max_range'])
             scan = scan[valid_p]
             
-            # Transform to world coordinates
+            # Homogeneous transformation
             scan_hom = np.ones((scan.shape[0], 4))
             scan_hom[:, 0:3] = scan[:, 0:3]
-            points = np.matmul(poses[i], scan_hom.T).T[:, 0:3]
+            points = np.matmul(poses[i], scan_hom.T).T
             
-            # Load labels
-            label = np.full((points.shape[0],), 0)  # Default to unlabeled
+            # Process labels
+            label = np.full((points.shape[0],), 2)
             label_file = seq_path + "labels/" + str(i).zfill(6)+'.label'
             if os.path.isfile(label_file):
-                raw_labels = open_label(label_file)[valid_p]
-                # Map to our reduced label set
-                for orig_label, mapped_label in LABEL_MAPPING.items():
-                    label[raw_labels == orig_label] = mapped_label
+                label = open_label(label_file)[valid_p]
+            
+            # Create features (intensity + label)
+            feature = np.column_stack((
+                scan[:, 3],  # intensity
+                label.astype('float'),
+                np.zeros(label.shape[0])  # padding
+            ))
+            
+            points = points[:, 0:3]  # Remove homogeneous coordinate
             
             # Combined validation mask
             valids = (
                 np.all(points > lower_bound, axis=1) & 
                 np.all(points < upper_bound, axis=1) & 
-                (label > 0))  # Only keep labeled points
+                (label < 200) & (label > 1)
+            )
             
-            all_points.append(points[valids])
-            all_intensities.append(scan[valids, 3])
-            all_labels.append(label[valids])
+            point_list.append(points[valids])
+            feature_list.append(feature[valids])
         
-        if not all_points:
-            return np.zeros((0, 3 + 1 + NUM_CLASSES + 3))  # xyz + intensity + one-hot + normals
+        if not point_list:
+            return np.zeros((0, 5))  # Return empty array if no points
         
-        # Concatenate all collected data
-        cloud = np.concatenate(all_points)
-        intensities = np.concatenate(all_intensities)
-        labels = np.concatenate(all_labels)
+        # Concatenate all points and features
+        cloud = np.concatenate(point_list)
+        cloud_clr = np.concatenate(feature_list)
         
-        # Return empty array if no valid points
-        if cloud.shape[0] == 0:
-            return np.zeros((0, 3 + 1 + NUM_CLASSES + 3))
-        
-        # Voxel downsampling with proper label handling
-        voxel_size = self.config['grid']['voxel_size']
-        voxel_coords = np.floor(cloud / voxel_size).astype(int)
-        unique_voxels, inverse = np.unique(voxel_coords, axis=0, return_inverse=True)
-        
-        # Initialize output arrays
-        downsampled_points = np.zeros((len(unique_voxels), 3))
-        downsampled_intensities = np.zeros(len(unique_voxels))
-        downsampled_labels = np.zeros((len(unique_voxels), NUM_CLASSES))
-        
-        # Process each voxel
-        for voxel_idx in range(len(unique_voxels)):
-            mask = (inverse == voxel_idx)
-            voxel_points = cloud[mask]
-            voxel_intensities = intensities[mask]
-            voxel_labels = labels[mask]
-            
-            # Average position and intensity
-            downsampled_points[voxel_idx] = np.mean(voxel_points, axis=0)
-            downsampled_intensities[voxel_idx] = np.mean(voxel_intensities)
-            
-            # Majority voting for one-hot labels
-            if len(voxel_labels) > 0:
-                label_counts = np.bincount(voxel_labels, minlength=NUM_CLASSES)
-                majority_label = np.argmax(label_counts)
-                downsampled_labels[voxel_idx, majority_label] = 1
-        
-        # Create Open3D point cloud for normal estimation
+        # Create Open3D point cloud
         pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(downsampled_points)
+        pcd.points = o3d.utility.Vector3dVector(cloud)
+        pcd.colors = o3d.utility.Vector3dVector(cloud_clr)
         
-        # Skip normal estimation if too few points
-        if len(downsampled_points) < 3:
-            normals = np.zeros((len(downsampled_points), 3))
-        else:
-            try:
-                # First estimate normals
-                pcd.estimate_normals(
-                    search_param=o3d.geometry.KDTreeSearchParamHybrid(
-                        radius=self.config['grid']['normal_eigenvalue_radius'], 
-                        max_nn=30
-                    )
-                )
-                # Then orient them
-                pcd.orient_normals_to_align_with_direction()
-                normals = np.asarray(pcd.normals)
-            except RuntimeError as e:
-                print(f"Normal estimation failed: {e}")
-                normals = np.zeros((len(downsampled_points), 3))
-        
-        # Combine all features
-        sparse_points_features = np.hstack((
-            downsampled_points,          # x, y, z (3)
-            downsampled_intensities[:, np.newaxis],  # intensity (1)
-            downsampled_labels,          # one-hot labels (NUM_CLASSES)
-            normals                      # normals (3)
-        ))
-        
-        print(f'#points {cloud.shape[0]} -> {downsampled_points.shape[0]}')
-        return sparse_points_features
+        # First pass: Fast voxel downsampling
+        voxel_size = self.config['grid']['voxel_size']
+        downpcd = self._voxel_downsample(cloud,cloud_clr[:, 0],cloud_clr[:, 1].astype(np.int32),voxel_size)       
+        print(f'#points {cloud.shape[0]} -> {downpcd.shape[0]}')
+        return downpcd
 
     def convert(self):
         time_very_start=time.time()
@@ -364,14 +339,12 @@ class Kitti2voxelConverter():
                 octree.setInput(points)
                 eig_normals=octree.computeEigenvaluesNormal(
                     self.config['grid']['normal_eigenvalue_radius'])
-                if sparse_points_features.shape[0] == 0:
-                    print("Warning: empty point cloud passed to octree")
-                    continue
+                print('sparse_points',sparse_points_features.shape)
                 sparse_points_features=np.hstack(
                     (sparse_points_features, eig_normals))
                 print('normal and eigenvalues estimation time',
                       time.time() - time_start)
-                # print('sparse_points',sparse_points.shape)
+                print('sparse_points',sparse_points_features.shape)
                 pcu.saveCloud2Binary(sparse_points_features, str(
                     i).zfill(6)+'.bin', out_dir)
 
@@ -395,14 +368,14 @@ if __name__ == "__main__":
         '-d',
         type=str,
         required=False,
-        default="/data",
+        default="/mnt/91d100fa-d283-4eeb-b68c-e2b4b199d2de/wiesmann/data/data_kitti/dataset",
         help='dataset folder containing all sequences in a folder called "sequences".',
     )
     parser.add_argument(
         '--arch_cfg', '-cfg',
         type=str,
         required=False,
-        default='config/depoco_OHE.yaml',
+        default='config/arch/sample_net.yaml',
         help='Architecture yaml cfg file. See /config/arch for sample. No default!',
     )
 
@@ -412,9 +385,7 @@ if __name__ == "__main__":
     #ARCH=yaml.safe_load(open(FLAGS.arch_cfg, 'r'))
 
     input_folder=FLAGS.dataset + '/sequences/00/'
-    print('input_folder', input_folder)
-    calib = input_folder + "calib.txt"
-    calibration=parse_calibration(calib)
+    calibration=parse_calibration(os.path.join(input_folder, "calib.txt"))
     poses=parse_poses(os.path.join(input_folder, "poses.txt"), calibration)
     idx, keypose, d=getKeyPoses(poses, delta=ARCH["grid"]["pose_distance"])
 
@@ -433,7 +404,3 @@ if __name__ == "__main__":
     converter=Kitti2voxelConverter(ARCH)
     # converter.getMaxMinHeight() # -9 to 4
     converter.convert()
-
-
-
-
